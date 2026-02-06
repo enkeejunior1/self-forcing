@@ -1,19 +1,19 @@
 #!/bin/bash
-#SBATCH --job-name=sf-dmd
+#SBATCH --job-name=sf-piflow
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --partition=gu-compute
-#SBATCH --gres=gpu:2
+#SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=16
 #SBATCH --time=24:00:00
 #SBATCH --qos=gu-high
-#SBATCH --mem=256G
+#SBATCH --mem=64G
 
 # ============================================================
-# Self-Forcing DMD Distillation Training Script
-# Base DMD (Distribution Matching Distillation) training
+# Pi-Flow Policy Distillation Training Script
+# Supports GMM (Gaussian Mixture Model) and DX (Direct x0) policies
 # ============================================================
 
 export CUDA_HOME=/usr/local/cuda-12.8
@@ -30,31 +30,31 @@ NUM_GPUS=$SLURM_GPUS_ON_NODE
 cd $SLURM_SUBMIT_DIR
 
 # ============================================================
-# Config: DMD Baseline (Self-Forcing)
+# Policy Type Selection
+# Options: "gmm" or "dx"
+#   - gmm: Gaussian Mixture Model policy (K Gaussians)
+#   - dx:  Direct x0 grid policy (K grid points)
 # ============================================================
-config_name="self_forcing_dmd"
+POLICY_TYPE="gmm" # Default to GMM, override with POLICY_TYPE=dx
+
+if [ "$POLICY_TYPE" = "dx" ]; then
+    config_name="self_forcing_piflow_dx"
+else
+    config_name="self_forcing_piflow_gmm"
+fi
 
 # ============================================================
 # Run Training
 # ============================================================
 echo "=========================================="
-echo "Self-Forcing DMD Distillation"
+echo "Pi-Flow Policy Distillation"
+echo "Policy Type: $POLICY_TYPE"
 echo "Config: $config_name"
 echo "GPUs: $NUM_GPUS"
 echo "=========================================="
-
-# Export so child processes inherit the variable
-export DEBUG_GPU_MEMORY=0
-export DEBUG_INFERENCE=0
 
 torchrun --nproc_per_node=$NUM_GPUS --standalone --master_port=$MASTER_PORT \
   train.py \
   --config_path configs/$config_name.yaml \
   --logdir "outputs/${config_name}_${SLURM_JOB_ID}" \
   --disable-wandb
-
-# torchrun --nproc_per_node=$NUM_GPUS --standalone --master_port=$MASTER_PORT \
-#   train.py \
-#   --config_path configs/$config_name.yaml \
-#   --logdir "outputs/${config_name}_${SLURM_JOB_ID}" \
-#   --disable-wandb
