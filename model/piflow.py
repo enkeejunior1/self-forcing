@@ -118,9 +118,16 @@ class Piflow(PiFlowSelfForcingModel):
         total_loss = torch.tensor(0.0, device=self.device, requires_grad=True)
         
         # Compute pi-flow loss if enabled and we have piflow_data
-        if piflow_loss_scale > 0 and piflow_data and len(piflow_data) > 0:
+        if piflow_loss_scale > 0 and piflow_data:
+            # Adapt pipeline dict to the list-of-dicts format expected by _compute_piflow_loss
+            adapted_piflow_data = [{
+                'x_t': piflow_data['x_t'],
+                'policy_params': piflow_data.get('params', {}),
+                'timestep_t': piflow_data['timestep'],
+                'timestep_s': torch.full_like(piflow_data['timestep'], piflow_data['denoised_timestep_to']),
+            }]
             piflow_loss, piflow_loss_dict = self._compute_piflow_loss(
-                piflow_data=piflow_data,
+                piflow_data=adapted_piflow_data,
                 conditional_dict=conditional_dict,
             )
             total_loss = total_loss + piflow_loss_scale * piflow_loss
@@ -148,7 +155,15 @@ class Piflow(PiFlowSelfForcingModel):
         """
         Compute pi-flow loss from collected trajectory data.
         
-        For each sampled (x_t, timestep_t, policy_params), we:
+        Args:
+            piflow_data: list of dicts, each with:
+                - 'x_t': (B, T, C, H, W) - noisy input
+                - 'policy_params': dict of policy parameters (GMM or DX)
+                - 'timestep_t': (B, T) - source timestep (higher noise)
+                - 'timestep_s': (B, T) - target timestep (lower noise)
+            conditional_dict: dict with text embeddings etc.
+        
+        For each entry, we:
         1. Use ODE integration with policy to get x_s at timestep_s (no grad)
         2. Compute policy velocity at x_s (with grad)
         3. Compute teacher velocity at x_s (no grad)
@@ -359,26 +374,18 @@ class Piflow(PiFlowSelfForcingModel):
         conditional_dict: dict,
     ) -> torch.Tensor:
         """Get velocity prediction from teacher (real_score) model."""
-        # Prepare inputs for teacher model
-        B, T, C, H, W = x_t.shape
-        
-        # Get text embeddings
-        encoder_hidden_states = conditional_dict.get('encoder_hidden_states')
-        encoder_hidden_states_t5 = conditional_dict.get('encoder_hidden_states_t5')
-        
-        # Reshape for model input
+        # Reshape for model input: (B, T, C, H, W) -> (B, C, T, H, W)
         x_t_input = rearrange(x_t, 'b t c h w -> b c t h w')
         
-        # Get model output
+        # Get model output (flow_pred, pred_x0)
         with torch.no_grad():
-            model_output = self.real_score(
-                x=x_t_input,
+            flow_pred, _ = self.real_score(
+                noisy_image_or_video=x_t_input,
+                conditional_dict=conditional_dict,
                 timestep=timestep,
-                encoder_hidden_states=encoder_hidden_states,
-                encoder_hidden_states_t5=encoder_hidden_states_t5,
             )
         
-        return model_output
+        return flow_pred
     
     def _compute_dmd_loss(
         self,
@@ -389,10 +396,6 @@ class Piflow(PiFlowSelfForcingModel):
         conditional_dict: dict,
     ) -> Tuple[torch.Tensor, dict]:
         """Compute DMD loss for distribution matching with segment-aware timestep sampling."""
-        # Get text embeddings
-        encoder_hidden_states = conditional_dict.get('encoder_hidden_states')
-        encoder_hidden_states_t5 = conditional_dict.get('encoder_hidden_states_t5')
-        
         B, T, C, H, W = pred_video.shape
         
         # Segment-aware timestep sampling with shift schedule
@@ -420,18 +423,16 @@ class Piflow(PiFlowSelfForcingModel):
         noisy_video_input = rearrange(noisy_video, 'b t c h w -> b c t h w')
         
         with torch.no_grad():
-            real_score_pred = self.real_score(
-                x=noisy_video_input,
-                timestep=timestep[:, 0],
-                encoder_hidden_states=encoder_hidden_states,
-                encoder_hidden_states_t5=encoder_hidden_states_t5,
+            real_score_pred, _ = self.real_score(
+                noisy_image_or_video=noisy_video_input,
+                conditional_dict=conditional_dict,
+                timestep=timestep,
             )
         
-        fake_score_pred = self.fake_score(
-            x=noisy_video_input,
-            timestep=timestep[:, 0],
-            encoder_hidden_states=encoder_hidden_states,
-            encoder_hidden_states_t5=encoder_hidden_states_t5,
+        fake_score_pred, _ = self.fake_score(
+            noisy_image_or_video=noisy_video_input,
+            conditional_dict=conditional_dict,
+            timestep=timestep,
         )
         
         # Score difference
@@ -455,10 +456,6 @@ class Piflow(PiFlowSelfForcingModel):
         """
         B, T, C, H, W = real_images_or_videos.shape
         
-        # Get text embeddings
-        encoder_hidden_states = conditional_dict.get('encoder_hidden_states')
-        encoder_hidden_states_t5 = conditional_dict.get('encoder_hidden_states_t5')
-        
         # Sample timestep
         timestep = self._get_timestep(
             min_timestep=20,
@@ -475,11 +472,10 @@ class Piflow(PiFlowSelfForcingModel):
         noisy_video_input = rearrange(noisy_video, 'b t c h w -> b c t h w')
         
         # Get fake score prediction
-        fake_score_pred = self.fake_score(
-            x=noisy_video_input,
-            timestep=timestep[:, 0],
-            encoder_hidden_states=encoder_hidden_states,
-            encoder_hidden_states_t5=encoder_hidden_states_t5,
+        fake_score_pred, _ = self.fake_score(
+            noisy_image_or_video=noisy_video_input,
+            conditional_dict=conditional_dict,
+            timestep=timestep,
         )
         
         # Target is the noise

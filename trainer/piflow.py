@@ -15,7 +15,7 @@ import wandb
 from omegaconf import OmegaConf
 
 from utils.dataset import ShardingLMDBDataset, TextDataset, cycle
-from utils.distributed import EMA_FSDP, fsdp_wrap, fsdp_state_dict, launch_distributed_job
+from utils.distributed import EMA_FSDP, EMA_Simple, fsdp_wrap, fsdp_state_dict, launch_distributed_job
 from utils.misc import set_seed, merge_dict_list
 from model import Piflow
 
@@ -34,13 +34,21 @@ class PiFlowTrainer:
         self.config = config
         self.step = 0
 
-        # Initialize distributed training environment
+        # Initialize training environment
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
 
-        launch_distributed_job()
-        global_rank = dist.get_rank()
-        self.world_size = dist.get_world_size()
+        self.use_fsdp = getattr(config, 'use_fsdp', True)
+
+        if self.use_fsdp:
+            launch_distributed_job()
+            global_rank = dist.get_rank()
+            self.world_size = dist.get_world_size()
+        else:
+            # Single-GPU mode without FSDP
+            global_rank = 0
+            self.world_size = 1
+            torch.cuda.set_device(0)
 
         self.dtype = torch.bfloat16 if config.mixed_precision else torch.float32
         self.device = torch.cuda.current_device()
@@ -51,7 +59,8 @@ class PiFlowTrainer:
         # Random seed setup
         if config.seed == 0:
             random_seed = torch.randint(0, 10000000, (1,), device=self.device)
-            dist.broadcast(random_seed, src=0)
+            if self.use_fsdp:
+                dist.broadcast(random_seed, src=0)
             config.seed = random_seed.item()
 
         set_seed(config.seed + global_rank)
@@ -93,35 +102,43 @@ class PiFlowTrainer:
             self.model.generator.model.gradient_checkpointing = True
             print(f"[Trainer] Enabled gradient checkpointing on generator")
 
-        # FSDP wrapping
-        self.model.generator = fsdp_wrap(
-            self.model.generator,
-            sharding_strategy=config.sharding_strategy,
-            mixed_precision=config.mixed_precision,
-            wrap_strategy=config.generator_fsdp_wrap_strategy
-        )
+        # Model wrapping
+        if self.use_fsdp:
+            # FSDP wrapping for distributed training
+            self.model.generator = fsdp_wrap(
+                self.model.generator,
+                sharding_strategy=config.sharding_strategy,
+                mixed_precision=config.mixed_precision,
+                wrap_strategy=config.generator_fsdp_wrap_strategy
+            )
 
-        self.model.real_score = fsdp_wrap(
-            self.model.real_score,
-            sharding_strategy=config.sharding_strategy,
-            mixed_precision=config.mixed_precision,
-            wrap_strategy=config.real_score_fsdp_wrap_strategy
-        )
+            self.model.real_score = fsdp_wrap(
+                self.model.real_score,
+                sharding_strategy=config.sharding_strategy,
+                mixed_precision=config.mixed_precision,
+                wrap_strategy=config.real_score_fsdp_wrap_strategy
+            )
 
-        self.model.fake_score = fsdp_wrap(
-            self.model.fake_score,
-            sharding_strategy=config.sharding_strategy,
-            mixed_precision=config.mixed_precision,
-            wrap_strategy=config.fake_score_fsdp_wrap_strategy
-        )
+            self.model.fake_score = fsdp_wrap(
+                self.model.fake_score,
+                sharding_strategy=config.sharding_strategy,
+                mixed_precision=config.mixed_precision,
+                wrap_strategy=config.fake_score_fsdp_wrap_strategy
+            )
 
-        self.model.text_encoder = fsdp_wrap(
-            self.model.text_encoder,
-            sharding_strategy=config.sharding_strategy,
-            mixed_precision=config.mixed_precision,
-            wrap_strategy=config.text_encoder_fsdp_wrap_strategy,
-            cpu_offload=getattr(config, "text_encoder_cpu_offload", False)
-        )
+            self.model.text_encoder = fsdp_wrap(
+                self.model.text_encoder,
+                sharding_strategy=config.sharding_strategy,
+                mixed_precision=config.mixed_precision,
+                wrap_strategy=config.text_encoder_fsdp_wrap_strategy,
+                cpu_offload=getattr(config, "text_encoder_cpu_offload", False)
+            )
+        else:
+            # Single-GPU: move models to device with appropriate dtype
+            self.model.generator = self.model.generator.to(device=self.device, dtype=self.dtype)
+            self.model.real_score = self.model.real_score.to(device=self.device, dtype=self.dtype)
+            self.model.fake_score = self.model.fake_score.to(device=self.device, dtype=self.dtype)
+            self.model.text_encoder = self.model.text_encoder.to(device=self.device)
 
         if not config.no_visualize or config.load_raw_video:
             self.model.vae = self.model.vae.to(
@@ -149,9 +166,12 @@ class PiFlowTrainer:
             dataset = ShardingLMDBDataset(config.data_path, max_pair=int(1e8))
         else:
             dataset = TextDataset(config.data_path)
-        sampler = torch.utils.data.distributed.DistributedSampler(
-            dataset, shuffle=True, drop_last=True
-        )
+        if self.use_fsdp:
+            sampler = torch.utils.data.distributed.DistributedSampler(
+                dataset, shuffle=True, drop_last=True
+            )
+        else:
+            sampler = torch.utils.data.RandomSampler(dataset)
         dataloader = torch.utils.data.DataLoader(
             dataset,
             batch_size=config.batch_size,
@@ -159,16 +179,19 @@ class PiFlowTrainer:
             num_workers=8
         )
 
-        if dist.get_rank() == 0:
+        if self.is_main_process:
             print(f"DATASET SIZE {len(dataset)}")
         self.dataloader = cycle(dataloader)
 
         # Set up EMA
-        rename_param = (
-            lambda name: name.replace("_fsdp_wrapped_module.", "")
-            .replace("_checkpoint_wrapped_module.", "")
-            .replace("_orig_mod.", "")
-        )
+        if self.use_fsdp:
+            rename_param = (
+                lambda name: name.replace("_fsdp_wrapped_module.", "")
+                .replace("_checkpoint_wrapped_module.", "")
+                .replace("_orig_mod.", "")
+            )
+        else:
+            rename_param = lambda name: name
         self.name_to_trainable_params = {}
         for n, p in self.model.generator.named_parameters():
             if not p.requires_grad:
@@ -178,9 +201,10 @@ class PiFlowTrainer:
 
         ema_weight = config.ema_weight
         self.generator_ema = None
+        EMA_cls = EMA_FSDP if self.use_fsdp else EMA_Simple
         if (ema_weight is not None) and (ema_weight > 0.0):
             print(f"Setting up EMA with weight {ema_weight}")
-            self.generator_ema = EMA_FSDP(self.model.generator, decay=ema_weight)
+            self.generator_ema = EMA_cls(self.model.generator, decay=ema_weight)
 
         # Delete EMA params for early steps
         if self.step < config.ema_start_step:
@@ -193,8 +217,12 @@ class PiFlowTrainer:
     def save(self):
         """Save model checkpoint."""
         print("Start gathering distributed model states...")
-        generator_state_dict = fsdp_state_dict(self.model.generator)
-        critic_state_dict = fsdp_state_dict(self.model.fake_score)
+        if self.use_fsdp:
+            generator_state_dict = fsdp_state_dict(self.model.generator)
+            critic_state_dict = fsdp_state_dict(self.model.fake_score)
+        else:
+            generator_state_dict = self.model.generator.state_dict()
+            critic_state_dict = self.model.fake_score.state_dict()
 
         if self.config.ema_start_step < self.step:
             state_dict = {
@@ -275,9 +303,15 @@ class PiFlowTrainer:
             )
 
             generator_loss.backward()
-            generator_grad_norm = self.model.generator.clip_grad_norm_(
-                self.max_grad_norm_generator
-            )
+            if self.use_fsdp:
+                generator_grad_norm = self.model.generator.clip_grad_norm_(
+                    self.max_grad_norm_generator
+                )
+            else:
+                generator_grad_norm = torch.nn.utils.clip_grad_norm_(
+                    self.model.generator.parameters(),
+                    self.max_grad_norm_generator
+                )
 
             generator_log_dict.update({
                 "generator_loss": generator_loss.detach(),
@@ -295,9 +329,15 @@ class PiFlowTrainer:
             )
 
             critic_loss.backward()
-            critic_grad_norm = self.model.fake_score.clip_grad_norm_(
-                self.max_grad_norm_critic
-            )
+            if self.use_fsdp:
+                critic_grad_norm = self.model.fake_score.clip_grad_norm_(
+                    self.max_grad_norm_critic
+                )
+            else:
+                critic_grad_norm = torch.nn.utils.clip_grad_norm_(
+                    self.model.fake_score.parameters(),
+                    self.max_grad_norm_critic
+                )
 
             critic_log_dict.update({
                 "critic_loss": critic_loss.detach(),
@@ -500,7 +540,8 @@ class PiFlowTrainer:
             # Create EMA params
             if (self.step >= self.config.ema_start_step) and \
                     (self.generator_ema is None) and (self.config.ema_weight > 0):
-                self.generator_ema = EMA_FSDP(self.model.generator, decay=self.config.ema_weight)
+                EMA_cls = EMA_FSDP if self.use_fsdp else EMA_Simple
+                self.generator_ema = EMA_cls(self.model.generator, decay=self.config.ema_weight)
 
             # Save model
             if (not self.config.no_save) and (self.step - start_step) > 0 and \
@@ -557,7 +598,7 @@ class PiFlowTrainer:
 
             # Garbage collection
             if self.step % self.config.gc_interval == 0:
-                if dist.get_rank() == 0:
+                if self.is_main_process:
                     logging.info("Running GC.")
                 gc.collect()
                 torch.cuda.empty_cache()

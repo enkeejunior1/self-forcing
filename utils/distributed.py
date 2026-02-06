@@ -88,6 +88,37 @@ def launch_distributed_job(backend: str = "nccl"):
     torch.cuda.set_device(local_rank)
 
 
+class EMA_Simple:
+    """EMA for non-FSDP modules. Directly accesses parameters without summon_full_params."""
+    def __init__(self, module: torch.nn.Module, decay: float = 0.999):
+        self.decay = decay
+        self.shadow = {}
+        self._init_shadow(module)
+
+    @torch.no_grad()
+    def _init_shadow(self, module):
+        for n, p in module.named_parameters():
+            self.shadow[n] = p.detach().clone().float().cpu()
+
+    @torch.no_grad()
+    def update(self, module):
+        d = self.decay
+        for n, p in module.named_parameters():
+            if n in self.shadow:
+                self.shadow[n].mul_(d).add_(p.detach().float().cpu(), alpha=1. - d)
+
+    def state_dict(self):
+        return self.shadow
+
+    def load_state_dict(self, sd):
+        self.shadow = {k: v.clone() for k, v in sd.items()}
+
+    def copy_to(self, module):
+        for n, p in module.named_parameters():
+            if n in self.shadow:
+                p.data.copy_(self.shadow[n].to(p.dtype, device=p.device))
+
+
 class EMA_FSDP:
     def __init__(self, fsdp_module: torch.nn.Module, decay: float = 0.999):
         self.decay = decay

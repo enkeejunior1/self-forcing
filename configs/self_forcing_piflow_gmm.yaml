@@ -107,6 +107,7 @@ max_grad_norm_critic: 10.0
 # Training Infrastructure
 # ------------------------------------------------------------
 mixed_precision: true
+use_fsdp: false              # false = single-GPU without FSDP; true = distributed FSDP
 seed: 0
 sharding_strategy: hybrid_full
 batch_size: 1
