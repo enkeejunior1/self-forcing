@@ -4,5 +4,5 @@ __pycache__
 wan_models
 checkpoints
 prompts/vidprom_filtered_extended.txt
-outputs/
+outputs*/
 logs/

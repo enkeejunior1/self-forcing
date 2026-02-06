@@ -109,7 +109,8 @@ class PiFlowTrainingPipeline:
         raw_s: torch.Tensor,
         raw_t: torch.Tensor,
         params: dict,
-        policy_type: str
+        policy_type: str,
+        use_policy_gradient_checkpointing: bool = False
     ) -> torch.Tensor:
         """
         ODE integration from timestep s to t using Euler method.
@@ -120,6 +121,7 @@ class PiFlowTrainingPipeline:
             raw_t: (B,) - raw timestep t (in [0, 1], t < s)
             params: dict with policy parameters
             policy_type: 'gmm', 'dmm', or 'dx'
+            use_policy_gradient_checkpointing: Whether to use gradient checkpointing in policy forward
         
         Returns:
             x_t: (B, F, C, H, W) - sample at timestep t
@@ -144,6 +146,7 @@ class PiFlowTrainingPipeline:
             pi = partial(
                 self.generator.pi,
                 x_0_grid=params['x_0_grid'],
+                use_gradient_checkpointing=use_policy_gradient_checkpointing,
             )
         else:  # gmm or dmm
             pi = partial(
@@ -153,6 +156,7 @@ class PiFlowTrainingPipeline:
                 std_s=params['std_s'],
                 x_s=x_s_reordered,
                 sigma_s=sigma_s_ref,
+                use_gradient_checkpointing=use_policy_gradient_checkpointing,
             )
         
         # ODE integration loop
@@ -239,11 +243,19 @@ class PiFlowTrainingPipeline:
         sigma_t: torch.Tensor,
         policy_type: str
     ) -> torch.Tensor:
-        """Get x0 via ODE integration from current timestep t to σ≈0."""
+        """Get x0 via ODE integration from current timestep t to σ≈0.
+        
+        Uses gradient checkpointing to save memory during the ODE integration,
+        since we have many substeps (integration_nfe) and don't need to save
+        all intermediate activations.
+        """
         sigma_t_scalar = sigma_t if sigma_t.dim() == 1 else sigma_t[:, 0]
         raw_t = self.sigma_to_t(sigma_t_scalar)
         raw_0 = torch.full_like(raw_t, self.eps)
-        x_0 = self.from_s_to_t(x_t, raw_t, raw_0, params, policy_type)
+        x_0 = self.from_s_to_t(
+            x_t, raw_t, raw_0, params, policy_type,
+            use_policy_gradient_checkpointing=True  # Save memory for ODE to t=0
+        )
         return x_0
 
     # ==================== Random Index Generation ====================

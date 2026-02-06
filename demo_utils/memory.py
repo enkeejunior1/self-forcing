@@ -6,7 +6,16 @@ import torch
 
 
 cpu = torch.device('cpu')
-gpu = torch.device(f'cuda:{torch.cuda.current_device()}')
+
+_gpu_device = None
+
+def gpu():
+    """Lazily initialize GPU device to avoid CUDA initialization at import time."""
+    global _gpu_device
+    if _gpu_device is None:
+        _gpu_device = torch.device(f'cuda:{torch.cuda.current_device()}')
+    return _gpu_device
+
 gpu_complete_modules = []
 
 
@@ -71,7 +80,7 @@ def fake_diffusers_current_device(model: torch.nn.Module, target_device: torch.d
 
 def get_cuda_free_memory_gb(device=None):
     if device is None:
-        device = gpu
+        device = gpu()
 
     memory_stats = torch.cuda.memory_stats(device)
     bytes_active = memory_stats['active_bytes.all.current']

@@ -37,8 +37,8 @@ parser.add_argument("--config_path", type=str, default='./configs/self_forcing_d
 parser.add_argument('--trt', action='store_true')
 args = parser.parse_args()
 
-print(f'Free VRAM {get_cuda_free_memory_gb(gpu)} GB')
-low_memory = get_cuda_free_memory_gb(gpu) < 40
+print(f'Free VRAM {get_cuda_free_memory_gb(gpu())} GB')
+low_memory = get_cuda_free_memory_gb(gpu()) < 40
 
 # Load models
 config = OmegaConf.load(args.config_path)
@@ -110,7 +110,7 @@ def initialize_vae_decoder(use_taehv=False, use_trt=False):
     current_vae_decoder.eval()
     current_vae_decoder.to(dtype=torch.float16)
     current_vae_decoder.requires_grad_(False)
-    current_vae_decoder.to(gpu)
+    current_vae_decoder.to(gpu())
     current_use_taehv = use_taehv
 
     print(f"✅ VAE decoder initialized with {'TAEHV' if use_taehv else 'default VAE'}")
@@ -135,17 +135,17 @@ transformer.requires_grad_(False)
 
 pipeline = CausalInferencePipeline(
     config,
-    device=gpu,
+    device=gpu(),
     generator=transformer,
     text_encoder=text_encoder,
     vae=vae_decoder
 )
 
 if low_memory:
-    DynamicSwapInstaller.install_model(text_encoder, device=gpu)
+    DynamicSwapInstaller.install_model(text_encoder, device=gpu())
 else:
-    text_encoder.to(gpu)
-transformer.to(gpu)
+    text_encoder.to(gpu())
+transformer.to(gpu())
 
 # Flask and SocketIO setup
 app = Flask(__name__)
@@ -288,9 +288,9 @@ def generate_video_stream(prompt, seed, enable_torch_compile=False, enable_fp8=F
         for key, value in conditional_dict.items():
             conditional_dict[key] = value.to(dtype=torch.float16)
         if low_memory:
-            gpu_memory_preservation = get_cuda_free_memory_gb(gpu) + 5
+            gpu_memory_preservation = get_cuda_free_memory_gb(gpu()) + 5
             move_model_to_device_with_memory_preservation(
-                text_encoder,target_device=gpu, preserved_memory_gb=gpu_memory_preservation)
+                text_encoder,target_device=gpu(), preserved_memory_gb=gpu_memory_preservation)
 
         # Handle torch.compile if enabled
         torch_compile_applied = enable_torch_compile
@@ -303,13 +303,13 @@ def generate_video_stream(prompt, seed, enable_torch_compile=False, enable_fp8=F
         # Initialize generation
         emit_progress('Initializing generation...', 12)
 
-        rnd = torch.Generator(gpu).manual_seed(seed)
-        # all_latents = torch.zeros([1, 21, 16, 60, 104], device=gpu, dtype=torch.bfloat16)
+        rnd = torch.Generator(gpu()).manual_seed(seed)
+        # all_latents = torch.zeros([1, 21, 16, 60, 104], device=gpu(), dtype=torch.bfloat16)
 
-        pipeline._initialize_kv_cache(batch_size=1, dtype=torch.float16, device=gpu)
-        pipeline._initialize_crossattn_cache(batch_size=1, dtype=torch.float16, device=gpu)
+        pipeline._initialize_kv_cache(batch_size=1, dtype=torch.float16, device=gpu())
+        pipeline._initialize_crossattn_cache(batch_size=1, dtype=torch.float16, device=gpu())
 
-        noise = torch.randn([1, 21, 16, 60, 104], device=gpu, dtype=torch.float16, generator=rnd)
+        noise = torch.randn([1, 21, 16, 60, 104], device=gpu(), dtype=torch.float16, generator=rnd)
 
         # Generation parameters
         num_blocks = 7
@@ -321,7 +321,7 @@ def generate_video_stream(prompt, seed, enable_torch_compile=False, enable_fp8=F
         else:
             vae_cache = ZERO_VAE_CACHE
             for i in range(len(vae_cache)):
-                vae_cache[i] = vae_cache[i].to(device=gpu, dtype=torch.float16)
+                vae_cache[i] = vae_cache[i].to(device=gpu(), dtype=torch.float16)
 
         total_frames_sent = 0
         generation_start_time = time.time()
@@ -619,7 +619,7 @@ def index():
 def api_status():
     return jsonify({
         'generation_active': generation_active,
-        'free_vram_gb': get_cuda_free_memory_gb(gpu),
+        'free_vram_gb': get_cuda_free_memory_gb(gpu()),
         'fp8_applied': fp8_applied,
         'torch_compile_applied': torch_compile_applied,
         'current_use_taehv': current_use_taehv

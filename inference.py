@@ -49,8 +49,8 @@ else:
     world_size = 1
     set_seed(args.seed)
 
-print(f'Free VRAM {get_cuda_free_memory_gb(gpu)} GB')
-low_memory = get_cuda_free_memory_gb(gpu) < 40
+print(f'Free VRAM {get_cuda_free_memory_gb(gpu())} GB')
+low_memory = get_cuda_free_memory_gb(gpu()) < 40
 
 torch.set_grad_enabled(False)
 
@@ -72,11 +72,11 @@ if args.checkpoint_path:
 
 pipeline = pipeline.to(dtype=torch.bfloat16)
 if low_memory:
-    DynamicSwapInstaller.install_model(pipeline.text_encoder, device=gpu)
+    DynamicSwapInstaller.install_model(pipeline.text_encoder, device=gpu())
 else:
-    pipeline.text_encoder.to(device=gpu)
-pipeline.generator.to(device=gpu)
-pipeline.vae.to(device=gpu)
+    pipeline.text_encoder.to(device=gpu())
+pipeline.generator.to(device=gpu())
+pipeline.vae.to(device=gpu())
 
 
 # Create dataset

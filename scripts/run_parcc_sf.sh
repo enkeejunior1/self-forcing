@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=sf-piflow
+#SBATCH --job-name=sf-dmd
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
 #SBATCH --nodes=1
@@ -23,34 +23,33 @@ conda activate self_forcing
 MASTER_PORT=$((29500 + SLURM_JOB_ID % 1000))
 NUM_GPUS=$SLURM_GPUS_ON_NODE
 cd $SLURM_SUBMIT_DIR
-echo "CUDA_VISIBLE_DEVICES: $CUDA_VISIBLE_DEVICES"
 
 # ============================================================
-# Policy Type Selection
-# Options: "gmm" or "dx"
-#   - gmm: Gaussian Mixture Model policy (K Gaussians)
-#   - dx:  Direct x0 grid policy (K grid points)
+# Config: DMD Baseline (Self-Forcing)
 # ============================================================
-POLICY_TYPE="gmm" # Default to GMM, override with POLICY_TYPE=dx
-
-if [ "$POLICY_TYPE" = "dx" ]; then
-    config_name="self_forcing_piflow_dx"
-else
-    config_name="self_forcing_piflow_gmm"
-fi
+config_name="self_forcing_dmd"
 
 # ============================================================
 # Run Training
 # ============================================================
 echo "=========================================="
-echo "Pi-Flow Policy Distillation"
-echo "Policy Type: $POLICY_TYPE"
+echo "Self-Forcing DMD Distillation"
 echo "Config: $config_name"
 echo "GPUs: $NUM_GPUS"
 echo "=========================================="
+
+# Export so child processes inherit the variable
+export DEBUG_GPU_MEMORY=0
+export DEBUG_INFERENCE=0
 
 torchrun --nproc_per_node=$NUM_GPUS --standalone --master_port=$MASTER_PORT \
   train.py \
   --config_path configs/$config_name.yaml \
   --logdir "outputs/${config_name}_${SLURM_JOB_ID}" \
   --disable-wandb
+
+# torchrun --nproc_per_node=$NUM_GPUS --standalone --master_port=$MASTER_PORT \
+#   train.py \
+#   --config_path configs/$config_name.yaml \
+#   --logdir "outputs/${config_name}_${SLURM_JOB_ID}" \
+#   --disable-wandb

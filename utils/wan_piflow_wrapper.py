@@ -49,6 +49,7 @@ class DXPolicy(nn.Module):
         x_0_grid: torch.Tensor,
         x_s: torch.Tensor = None,
         sigma_s: torch.Tensor = None,
+        use_gradient_checkpointing: bool = None,
     ) -> torch.Tensor:
         """
         Compute velocity v_t by interpolating x_0 from grid points.
@@ -57,11 +58,16 @@ class DXPolicy(nn.Module):
             x_t: (B, C, F, H, W) - current noisy sample
             sigma_t: (B,) - current noise level
             x_0_grid: (B, K, C, F, H, W) - x_0 predictions at K grid points
+            use_gradient_checkpointing: Optional override for gradient checkpointing
             
         Returns:
             v_t: (B, C, F, H, W) - velocity prediction
         """
-        if self.use_gradient_checkpointing and self.training:
+        # Allow per-call override of gradient checkpointing
+        if use_gradient_checkpointing is None:
+            use_gradient_checkpointing = self.use_gradient_checkpointing
+        
+        if use_gradient_checkpointing and self.training:
             v_t, _ = torch.utils.checkpoint.checkpoint(
                 dx_policy_forward,
                 x_t, sigma_t, x_0_grid, self.eps,
@@ -173,6 +179,7 @@ class GMPolicy(nn.Module):
         std_s: torch.Tensor,
         x_s: torch.Tensor, 
         sigma_s: torch.Tensor,
+        use_gradient_checkpointing: bool = None,
     ) -> torch.Tensor:
         """
         Compute velocity v_t based on GMM parameters from x_s.
@@ -185,13 +192,18 @@ class GMPolicy(nn.Module):
             std_s: (B, 1, 1, 1, 1, 1) - standard deviations
             x_s: (B, C, F, H, W) - noisy sample at timestep s
             sigma_s: (B,) - noise level at timestep s
+            use_gradient_checkpointing: Optional override for gradient checkpointing
             
         Returns:
             v_t: (B, C, F, H, W) - velocity at timestep t
         """
         use_dmm = self.policy_type == 'dmm'
         
-        if self.use_gradient_checkpointing and self.training:
+        # Allow per-call override of gradient checkpointing
+        if use_gradient_checkpointing is None:
+            use_gradient_checkpointing = self.use_gradient_checkpointing
+        
+        if use_gradient_checkpointing and self.training:
             return torch.utils.checkpoint.checkpoint(
                 gmm_policy_forward,
                 x_t, sigma_t, a_s, mu_s, std_s, x_s, sigma_s, self.eps, use_dmm,

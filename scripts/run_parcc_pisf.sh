@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=sf-piflow
+#SBATCH --job-name=sf-pisf
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
 #SBATCH --nodes=1
@@ -8,17 +8,18 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=32
 #SBATCH --time=24:00:00
-#SBATCH --exclude=dgx017
+#SBATCH --nodelist=dgx004,dgx005,dgx006,dgx009,dgx010,dgx011,dgx012,dgx013
 
 # ============================================================
-# Pi-Flow Policy Distillation Training Script
-# Supports GMM (Gaussian Mixture Model) and DX (Direct x0) policies
+# Pi-Flow + Self-Forcing (PiSF) Training Script
+# Combines pi-flow velocity matching with DMD distribution matching
+# DMD timestep sampling is segment-aware
 # ============================================================
 
 module purge
 module load cuda/12.8
 source /vast/projects/jgu32/lab/yhpark/miniconda3/etc/profile.d/conda.sh
-conda activate self_forcing 
+conda activate self_forcing
 
 MASTER_PORT=$((29500 + SLURM_JOB_ID % 1000))
 NUM_GPUS=$SLURM_GPUS_ON_NODE
@@ -26,28 +27,21 @@ cd $SLURM_SUBMIT_DIR
 echo "CUDA_VISIBLE_DEVICES: $CUDA_VISIBLE_DEVICES"
 
 # ============================================================
-# Policy Type Selection
-# Options: "gmm" or "dx"
-#   - gmm: Gaussian Mixture Model policy (K Gaussians)
-#   - dx:  Direct x0 grid policy (K grid points)
+# Config: PiSF (Pi-Flow + DMD with segment-aware sampling)
 # ============================================================
-POLICY_TYPE="gmm" # Default to GMM, override with POLICY_TYPE=dx
-
-if [ "$POLICY_TYPE" = "dx" ]; then
-    config_name="self_forcing_piflow_dx"
-else
-    config_name="self_forcing_piflow_gmm"
-fi
+config_name="self_forcing_pisf_gmm"
 
 # ============================================================
 # Run Training
 # ============================================================
 echo "=========================================="
-echo "Pi-Flow Policy Distillation"
-echo "Policy Type: $POLICY_TYPE"
+echo "PiSF: Pi-Flow + Self-Forcing Distillation"
 echo "Config: $config_name"
 echo "GPUs: $NUM_GPUS"
 echo "=========================================="
+
+export DEBUG_GPU_MEMORY=0
+export DEBUG_INFERENCE=0
 
 torchrun --nproc_per_node=$NUM_GPUS --standalone --master_port=$MASTER_PORT \
   train.py \

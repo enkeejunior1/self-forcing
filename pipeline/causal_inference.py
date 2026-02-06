@@ -86,8 +86,8 @@ class CausalInferencePipeline(torch.nn.Module):
         )
 
         if low_memory:
-            gpu_memory_preservation = get_cuda_free_memory_gb(gpu) + 5
-            move_model_to_device_with_memory_preservation(self.text_encoder, target_device=gpu, preserved_memory_gb=gpu_memory_preservation)
+            gpu_memory_preservation = get_cuda_free_memory_gb(gpu()) + 5
+            move_model_to_device_with_memory_preservation(self.text_encoder, target_device=gpu(), preserved_memory_gb=gpu_memory_preservation)
 
         output = torch.zeros(
             [batch_size, num_output_frames, num_channels, height, width],

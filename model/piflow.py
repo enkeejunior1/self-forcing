@@ -63,7 +63,16 @@ class Piflow(PiFlowSelfForcingModel):
     
     def initialize_policy_head_weights(self, verbose=True):
         """Initialize policy head weights from pretrained generator weights."""
-        self.generator.initialize_policy_head_weights(verbose=verbose)
+        if self.policy_type == 'dx':
+            self.generator.initialize_dx_head_weights()
+            if verbose:
+                print(f"[Piflow] Initialized DX policy head weights")
+        elif self.policy_type == 'gmm':
+            self.generator.initialize_gmm_head_weights()
+            if verbose:
+                print(f"[Piflow] Initialized GMM policy head weights")
+        else:
+            raise ValueError(f"Unknown policy type: {self.policy_type}")
     
     def generator_loss(
         self,
@@ -375,22 +384,29 @@ class Piflow(PiFlowSelfForcingModel):
         timestep_to: int,
         conditional_dict: dict,
     ) -> Tuple[torch.Tensor, dict]:
-        """Compute DMD loss for distribution matching."""
+        """Compute DMD loss for distribution matching with segment-aware timestep sampling."""
         # Get text embeddings
         encoder_hidden_states = conditional_dict.get('encoder_hidden_states')
         encoder_hidden_states_t5 = conditional_dict.get('encoder_hidden_states_t5')
         
         B, T, C, H, W = pred_video.shape
         
-        # Sample random timestep for DMD
-        timestep = self._get_timestep(
-            min_timestep=20,
-            max_timestep=980,
-            batch_size=B,
-            num_frame=T,
-            num_frame_per_block=self.num_frame_per_block,
-            uniform_timestep=False,
-        )
+        # Segment-aware timestep sampling with shift schedule
+        # Use segment bounds if available, otherwise fall back to global range
+        min_t = max(int(timestep_to), 20) if timestep_to is not None else 20
+        max_t = min(int(timestep_from), 980) if timestep_from is not None else 980
+        if min_t >= max_t:
+            min_t, max_t = 20, 980  # fallback if segment is degenerate
+        
+        # Convert segment bounds to raw_t (unwarped continuous space)
+        raw_t_min = self._sigma_to_t(torch.tensor(min_t / 1000.0, device=self.device))
+        raw_t_max = self._sigma_to_t(torch.tensor(max_t / 1000.0, device=self.device))
+        
+        # Sample uniform raw_t in segment range, then warp through shift schedule
+        raw_t = torch.rand(B, device=self.device) * (raw_t_max - raw_t_min) + raw_t_min
+        sigma_t = self._t_to_sigma(raw_t)
+        timestep = (sigma_t * 1000).clamp(20, 980).long()
+        timestep = timestep.unsqueeze(1).expand(B, T)
         
         # Add noise to predicted video
         noise = torch.randn_like(pred_video)
