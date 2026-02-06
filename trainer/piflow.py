@@ -319,6 +319,9 @@ class PiFlowTrainer:
         _, _, C, H, W = self.config.image_or_video_shape
         
         # Create pipeline
+        # IMPORTANT: For inference/visualization, always use ALL denoising steps
+        # last_step_only=True ensures all steps are executed (exit at last step = all 4 NFE used)
+        # last_step_only=False would randomly exit early (only some NFE used)
         pipeline = PiFlowTrainingPipeline(
             denoising_step_list=self.model.denoising_step_list,
             scheduler=self.model.scheduler,
@@ -326,7 +329,7 @@ class PiFlowTrainer:
             num_frame_per_block=self.model.num_frame_per_block,
             independent_first_frame=self.config.independent_first_frame,
             same_step_across_blocks=self.config.same_step_across_blocks,
-            last_step_only=self.config.last_step_only,
+            last_step_only=True,  # Exit at last step = use all 4 NFE
             num_max_frames=self.model.num_training_frames,
             context_noise=self.config.context_noise,
             policy_type=getattr(self.config, 'policy_type', ''),
