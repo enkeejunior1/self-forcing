@@ -88,6 +88,11 @@ class PiFlowTrainer:
         # Save pretrained model state_dicts to CPU
         self.fake_score_state_dict_cpu = self.model.fake_score.state_dict()
 
+        # Enable gradient checkpointing on the CausalWanModel before FSDP wrapping
+        if getattr(config, 'gradient_checkpointing', False):
+            self.model.generator.model.gradient_checkpointing = True
+            print(f"[Trainer] Enabled gradient checkpointing on generator")
+
         # FSDP wrapping
         self.model.generator = fsdp_wrap(
             self.model.generator,
