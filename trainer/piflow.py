@@ -9,6 +9,7 @@ import time
 import numpy as np
 from tqdm import tqdm
 
+from contextlib import nullcontext
 import torch
 import torch.distributed as dist
 import wandb
@@ -38,7 +39,12 @@ class PiFlowTrainer:
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
 
-        self.use_fsdp = getattr(config, 'use_fsdp', True)
+        # Auto-detect: use FSDP only when multiple GPUs are available,
+        # unless explicitly overridden via config
+        if hasattr(config, 'use_fsdp'):
+            self.use_fsdp = config.use_fsdp
+        else:
+            self.use_fsdp = torch.cuda.device_count() > 1
 
         if self.use_fsdp:
             launch_distributed_job()
@@ -290,17 +296,26 @@ class PiFlowTrainer:
             else:
                 unconditional_dict = self.unconditional_dict
 
+        # Use autocast for mixed precision when not using FSDP
+        # (FSDP handles this internally via MixedPrecision policy)
+        autocast_ctx = (
+            torch.autocast(device_type='cuda', dtype=self.dtype)
+            if (not self.use_fsdp and self.config.mixed_precision)
+            else nullcontext()
+        )
+
         # Compute loss
         if model_type == 'generator':
             # Prepare input video from shape (generate noise internally in model)
             real_video = torch.zeros(image_or_video_shape, device=self.device, dtype=self.dtype)
             
-            generator_loss, generator_log_dict = self.model.generator_loss(
-                real_images_or_videos=real_video,
-                conditional_dict=conditional_dict,
-                piflow_loss_scale=piflow_loss_scale,
-                dmd_loss_scale=dmd_loss_scale,
-            )
+            with autocast_ctx:
+                generator_loss, generator_log_dict = self.model.generator_loss(
+                    real_images_or_videos=real_video,
+                    conditional_dict=conditional_dict,
+                    piflow_loss_scale=piflow_loss_scale,
+                    dmd_loss_scale=dmd_loss_scale,
+                )
 
             generator_loss.backward()
             if self.use_fsdp:
@@ -323,10 +338,11 @@ class PiFlowTrainer:
             # For critic, we need real video data
             real_video = torch.zeros(image_or_video_shape, device=self.device, dtype=self.dtype)
             
-            critic_loss, critic_log_dict = self.model.critic_loss(
-                real_images_or_videos=real_video,
-                conditional_dict=conditional_dict,
-            )
+            with autocast_ctx:
+                critic_loss, critic_log_dict = self.model.critic_loss(
+                    real_images_or_videos=real_video,
+                    conditional_dict=conditional_dict,
+                )
 
             critic_loss.backward()
             if self.use_fsdp:

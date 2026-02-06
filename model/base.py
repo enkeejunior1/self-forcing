@@ -147,7 +147,8 @@ class SelfForcingModel(BaseModel):
         max_num_blocks = max_num_frames // self.num_frame_per_block
         min_num_blocks = min_num_frames // self.num_frame_per_block
         num_generated_blocks = torch.randint(min_num_blocks, max_num_blocks + 1, (1,), device=self.device)
-        dist.broadcast(num_generated_blocks, src=0)
+        if dist.is_initialized():
+            dist.broadcast(num_generated_blocks, src=0)
         num_generated_blocks = num_generated_blocks.item()
         num_generated_frames = num_generated_blocks * self.num_frame_per_block
         if self.args.independent_first_frame and initial_latent is None:
@@ -344,7 +345,8 @@ class PiFlowSelfForcingModel(PiFlowBaseModel):
         max_num_blocks = max_num_frames // self.num_frame_per_block
         min_num_blocks = min_num_frames // self.num_frame_per_block
         num_generated_blocks = torch.randint(min_num_blocks, max_num_blocks + 1, (1,), device=self.device)
-        dist.broadcast(num_generated_blocks, src=0)
+        if dist.is_initialized():
+            dist.broadcast(num_generated_blocks, src=0)
         num_generated_blocks = num_generated_blocks.item()
         num_generated_frames = num_generated_blocks * self.num_frame_per_block
         if self.args.independent_first_frame and initial_latent is None:

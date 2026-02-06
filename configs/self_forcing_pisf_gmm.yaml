@@ -108,7 +108,8 @@ max_grad_norm_critic: 10.0
 # Training Infrastructure
 # ------------------------------------------------------------
 mixed_precision: true
-use_fsdp: true               # true = distributed FSDP (required for multi-model pisf)
+# use_fsdp: auto-detected (GPU count > 1 = true, otherwise false). Uncomment to override.
+# use_fsdp: true
 seed: 0
 sharding_strategy: hybrid_full
 batch_size: 1
