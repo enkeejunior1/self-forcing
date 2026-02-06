@@ -36,6 +36,10 @@ class Piflow(PiFlowSelfForcingModel):
         self.piflow_loss_scale = getattr(args, 'piflow_loss_scale', 1.0)
         self.dmd_loss_scale = getattr(args, 'dmd_loss_scale', 0.0)
         
+        # Enable gradient checkpointing
+        if args.gradient_checkpointing:
+            self.generator.enable_gradient_checkpointing()
+
         # Initialize policy heads
         self._init_policy_heads(args)
         

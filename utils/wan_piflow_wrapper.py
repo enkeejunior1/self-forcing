@@ -407,6 +407,8 @@ class WanPiflowWrapper(torch.nn.Module):
         
         self.has_gmm_heads = True
         self.policy_head_type = 'gmm'
+        self.pi = GMPolicy(eps=1e-4, use_gradient_checkpointing=False, policy_type='gmm',
+                           patch_size=patch_size, use_patch_K=use_patch_K)
         print(f"[WanPiflowWrapper] Created GMM heads with K={num_gaussians}, latent_c={latent_c}")
 
     def initialize_gmm_head_weights(self) -> None:

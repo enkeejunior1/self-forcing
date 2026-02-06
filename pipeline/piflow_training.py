@@ -416,7 +416,8 @@ class PiFlowTrainingPipeline:
                             raw_t = self.sigma_to_t(sigma_t[:, 0])
                             raw_s = self.sigma_to_t(sigma_s[:, 0])
                             noisy_input = self.from_s_to_t(
-                                noisy_input, raw_t, raw_s, params, self.policy_type
+                                noisy_input, raw_t, raw_s, params, self.policy_type,
+                                use_policy_gradient_checkpointing=True
                             )
                         else:
                             # DMD-style: predict x0, add noise
