@@ -185,13 +185,14 @@ class SelfForcingTrainingPipeline:
                     
                     if DEBUG_GPU_MEMORY and dist.get_rank() == 0:
                         print_gpu_memory_summary(logging, tag=f"AFTER generator (block={block_index}, step={index})")
-                        next_timestep = self.denoising_step_list[index + 1]
-                        noisy_input = self.scheduler.add_noise(
-                            denoised_pred.flatten(0, 1),
-                            torch.randn_like(denoised_pred.flatten(0, 1)),
-                            next_timestep * torch.ones(
-                                [batch_size * current_num_frames], device=noise.device, dtype=torch.long)
-                        ).unflatten(0, denoised_pred.shape[:2])
+                    
+                    next_timestep = self.denoising_step_list[index + 1]
+                    noisy_input = self.scheduler.add_noise(
+                        denoised_pred.flatten(0, 1),
+                        torch.randn_like(denoised_pred.flatten(0, 1)),
+                        next_timestep * torch.ones(
+                            [batch_size * current_num_frames], device=noise.device, dtype=torch.long)
+                    ).unflatten(0, denoised_pred.shape[:2])
                 else:
                     # for getting real output
                     # with torch.set_grad_enabled(current_start_frame >= start_gradient_frame_index):

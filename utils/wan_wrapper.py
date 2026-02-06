@@ -18,7 +18,7 @@ class WanTextEncoder(torch.nn.Module):
         self.text_encoder = umt5_xxl(
             encoder_only=True,
             return_tokenizer=False,
-            dtype=torch.bfloat16,
+            dtype=torch.float32,
             device=torch.device('cpu')
         ).eval().requires_grad_(False)
         self.text_encoder.load_state_dict(
