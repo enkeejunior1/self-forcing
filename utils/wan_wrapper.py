@@ -18,7 +18,7 @@ class WanTextEncoder(torch.nn.Module):
         self.text_encoder = umt5_xxl(
             encoder_only=True,
             return_tokenizer=False,
-            dtype=torch.float32,
+            dtype=torch.bfloat16,
             device=torch.device('cpu')
         ).eval().requires_grad_(False)
         self.text_encoder.load_state_dict(
@@ -125,9 +125,11 @@ class WanDiffusionWrapper(torch.nn.Module):
 
         if is_causal:
             self.model = CausalWanModel.from_pretrained(
-                f"wan_models/{model_name}/", local_attn_size=local_attn_size, sink_size=sink_size)
+                f"wan_models/{model_name}/", local_attn_size=local_attn_size, sink_size=sink_size,
+                torch_dtype=torch.bfloat16)
         else:
-            self.model = WanModel.from_pretrained(f"wan_models/{model_name}/")
+            self.model = WanModel.from_pretrained(
+                f"wan_models/{model_name}/", torch_dtype=torch.bfloat16)
         self.model.eval()
 
         # For non-causal diffusion, all frames share the same timestep

@@ -249,7 +249,7 @@ class PiFlowTrainingPipeline:
     # ==================== Random Index Generation ====================
     
     def generate_and_sync_list(
-        self,3
+        self,
         num_blocks: int,
         num_denoising_steps: int,
         device: torch.device

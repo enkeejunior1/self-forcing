@@ -1,12 +1,15 @@
 import gc
 import logging
+import os
 
 from utils.dataset import ShardingLMDBDataset, cycle
 from utils.dataset import TextDataset
 from utils.distributed import EMA_FSDP, fsdp_wrap, fsdp_state_dict, launch_distributed_job
 from utils.misc import (
     set_seed,
-    merge_dict_list
+    merge_dict_list,
+    print_gpu_tensors,
+    print_gpu_memory_summary
 )
 import torch.distributed as dist
 from omegaconf import OmegaConf
@@ -14,7 +17,9 @@ from model import CausVid, DMD, SiD
 import torch
 import wandb
 import time
-import os
+
+# Enable via: DEBUG_GPU_MEMORY=1
+DEBUG_GPU_MEMORY = os.environ.get('DEBUG_GPU_MEMORY', '0') == '1'
 
 
 class Trainer:
@@ -309,18 +314,159 @@ class Trainer:
         current_video = video.permute(0, 1, 3, 4, 2).cpu().numpy() * 255.0
         return current_video
 
+    def _sanitize_filename(self, text, max_len=80):
+        """Convert text to a safe filename string."""
+        import re
+        text = re.sub(r'[^\w\s-]', '', text)
+        text = re.sub(r'[-\s]+', '_', text)
+        return text[:max_len]
+
+    def _to_uint8_video(self, video):
+        """Convert video tensor to uint8 numpy array."""
+        # video: (C, T, H, W) or (T, H, W, C)
+        if isinstance(video, torch.Tensor):
+            video = video.cpu().numpy()
+        video = (video * 255.0).clip(0, 255).astype('uint8')
+        return video
+
+    def _save_gif(self, video_uint8, out_path, fps=16):
+        """Save video as animated GIF."""
+        try:
+            from PIL import Image
+            # Assume video_uint8 is (T, H, W, C)
+            if video_uint8.ndim == 3:  # (T, H, W)
+                video_uint8 = video_uint8[..., None]
+            frames = [Image.fromarray(video_uint8[i]) for i in range(video_uint8.shape[0])]
+            duration_ms = int(1000 / fps)
+            frames[0].save(
+                out_path,
+                save_all=True,
+                append_images=frames[1:],
+                duration=duration_ms,
+                loop=0
+            )
+            print(f"[GIF] Saved via Pillow: {out_path}")
+        except Exception as e:
+            print(f"[GIF] Failed to save GIF {out_path}: {e}")
+
+    def visualize_samples(self):
+        """Generate and save sample videos. All ranks must call this for FSDP."""
+        # Skip if visualization is disabled
+        if self.config.no_visualize:
+            return
+        
+        # Print only on main process
+        if self.is_main_process:
+            print(f"\n{'='*60}")
+            print(f"[Visualize Step {self.step}] Starting qualitative sample generation...")
+            print(f"{'='*60}")
+        
+        prompts = [
+            "A stylish woman walks down a Tokyo street filled with warm glowing neon and animated city signage. "
+            "She wears a black leather jacket, a long red dress, and black boots, and carries a black purse. "
+            "She wears sunglasses and red lipstick. She walks confidently and casually. "
+            "The street is damp and reflective, creating a mirror effect of the colorful lights. Many pedestrians walk about."
+        ]
+        
+        batch_size = len(prompts)
+        _, _, C, H, W = self.config.image_or_video_shape
+        
+        # Get text embeddings (ALL RANKS must call FSDP model)
+        if self.is_main_process:
+            print("[1/4] Encoding text prompts...")
+        start = time.time()
+        with torch.no_grad():
+            conditional_dict = self.model.text_encoder(text_prompts=prompts)
+        if self.is_main_process:
+            print(f"  └─ Text encoding: {time.time()-start:.2f}s")
+        
+        # Prepare noise
+        if self.is_main_process:
+            print("[2/4] Running inference (denoising blocks)...")
+        sampled_noise = torch.randn(
+            [batch_size, self.model.num_training_frames, C, H, W],
+            device=self.device,
+            dtype=self.dtype
+        )
+        
+        # Use model's existing inference pipeline (ALL RANKS must call FSDP model)
+        start = time.time()
+        with torch.no_grad():
+            output, _, _ = self.model._consistency_backward_simulation(
+                noise=sampled_noise,
+                **conditional_dict  # Unpack dict as kwargs
+            )
+        if self.is_main_process:
+            print(f"  └─ Inference: {time.time()-start:.2f}s")
+        
+        # Decode latents to video (ALL RANKS must call FSDP VAE)
+        if self.is_main_process:
+            print("[3/4] Decoding latents to pixels (VAE)...")
+        start = time.time()
+        video = self.model.vae.decode_to_pixel(output, use_cache=False)
+        video = (video * 0.5 + 0.5).clamp(0, 1)
+        if self.is_main_process:
+            print(f"  └─ VAE decoding: {time.time()-start:.2f}s")
+        
+        # Convert to uint8 format: (B, T, H, W, C)
+        videos = video.permute(0, 1, 3, 4, 2).cpu().numpy() * 255.0
+        videos = videos.clip(0, 255).astype('uint8')
+        
+        # Save GIF only on main process
+        if self.is_main_process:
+            print("[4/4] Saving GIF...")
+            start = time.time()
+            for i, (prompt, video_array) in enumerate(zip(prompts, videos)):
+                if getattr(self.config, "save_gif", True):
+                    out_dir = os.path.join(self.output_path, "samples")
+                    os.makedirs(out_dir, exist_ok=True)
+                    prompt_slug = self._sanitize_filename(prompt, max_len=80)
+                    out_path = os.path.join(
+                        out_dir, f"step_{self.step:06d}_sample_{i}_{prompt_slug}.gif"
+                    )
+                    self._save_gif(video_array, out_path, fps=16)
+                    print(f"  └─ Saved: {out_path}")
+            print(f"  └─ GIF saving: {time.time()-start:.2f}s")
+            
+            print(f"[Visualize Step {self.step}] Complete!")
+            print(f"{'='*60}\n")
+
     def train(self):
         start_step = self.step
 
         while True:
+            # Visualize samples every 10 iterations (before training to see current model state)
+            # ALL RANKS must call this because it uses FSDP models
+            if ((self.step - start_step) % 10 == 0):
+                torch.cuda.empty_cache()
+                self.visualize_samples()  # All ranks execute
+                torch.cuda.empty_cache()
+                dist.barrier()  # Ensure all ranks finish before continuing
+
             TRAIN_GENERATOR = self.step % self.config.dfake_gen_update_ratio == 0
+
+            # Memory debug: log before training step
+            if DEBUG_GPU_MEMORY and self.is_main_process and self.step <= start_step + 3:
+                print_gpu_tensors(logging, tag=f"BEFORE step={self.step}")
+                print_gpu_memory_summary(logging, tag=f"BEFORE step={self.step}")
 
             # Train the generator
             if TRAIN_GENERATOR:
                 self.generator_optimizer.zero_grad(set_to_none=True)
                 extras_list = []
                 batch = next(self.dataloader)
+                
+                # Memory debug: before generator forward/backward
+                if DEBUG_GPU_MEMORY and self.is_main_process and self.step <= start_step + 3:
+                    print_gpu_memory_summary(logging, tag=f"BEFORE generator fwdbwd step={self.step}")
+                
                 extra = self.fwdbwd_one_step(batch, True)
+                
+                # Memory debug: after generator forward/backward
+                if DEBUG_GPU_MEMORY and self.is_main_process and self.step <= start_step + 3:
+                    print_gpu_tensors(logging, tag=f"AFTER generator fwdbwd step={self.step}")
+                    print_gpu_memory_summary(logging, tag=f"AFTER generator fwdbwd step={self.step}")
+                
                 extras_list.append(extra)
                 generator_log_dict = merge_dict_list(extras_list)
                 self.generator_optimizer.step()
@@ -331,7 +477,18 @@ class Trainer:
             self.critic_optimizer.zero_grad(set_to_none=True)
             extras_list = []
             batch = next(self.dataloader)
+            
+            # Memory debug: before critic forward/backward
+            if DEBUG_GPU_MEMORY and self.is_main_process and self.step <= start_step + 3:
+                print_gpu_memory_summary(logging, tag=f"BEFORE critic fwdbwd step={self.step}")
+            
             extra = self.fwdbwd_one_step(batch, False)
+            
+            # Memory debug: after critic forward/backward
+            if DEBUG_GPU_MEMORY and self.is_main_process and self.step <= start_step + 3:
+                print_gpu_tensors(logging, tag=f"AFTER critic fwdbwd step={self.step}")
+                print_gpu_memory_summary(logging, tag=f"AFTER critic fwdbwd step={self.step}")
+            
             extras_list.append(extra)
             critic_log_dict = merge_dict_list(extras_list)
             self.critic_optimizer.step()

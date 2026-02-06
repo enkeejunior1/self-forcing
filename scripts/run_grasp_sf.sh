@@ -9,7 +9,7 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --time=24:00:00
 #SBATCH --qos=gu-high
-#SBATCH --mem=64G
+#SBATCH --mem=256G
 
 # ============================================================
 # Self-Forcing DMD Distillation Training Script
@@ -43,8 +43,18 @@ echo "Config: $config_name"
 echo "GPUs: $NUM_GPUS"
 echo "=========================================="
 
+# Export so child processes inherit the variable
+export DEBUG_GPU_MEMORY=0
+export DEBUG_INFERENCE=0
+
 torchrun --nproc_per_node=$NUM_GPUS --standalone --master_port=$MASTER_PORT \
   train.py \
   --config_path configs/$config_name.yaml \
   --logdir "outputs/${config_name}_${SLURM_JOB_ID}" \
   --disable-wandb
+
+# torchrun --nproc_per_node=$NUM_GPUS --standalone --master_port=$MASTER_PORT \
+#   train.py \
+#   --config_path configs/$config_name.yaml \
+#   --logdir "outputs/${config_name}_${SLURM_JOB_ID}" \
+#   --disable-wandb

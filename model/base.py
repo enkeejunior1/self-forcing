@@ -1,3 +1,5 @@
+import logging
+import os
 from typing import Tuple
 from einops import rearrange
 from torch import nn
@@ -6,8 +8,12 @@ import torch
 
 from pipeline import SelfForcingTrainingPipeline
 from utils.loss import get_denoising_loss
+from utils.misc import print_gpu_tensors, print_gpu_memory_summary
 from utils.wan_wrapper import WanDiffusionWrapper, WanTextEncoder, WanVAEWrapper
 from utils.wan_piflow_wrapper import WanPiflowWrapper
+
+# Enable via: DEBUG_GPU_MEMORY=1
+DEBUG_GPU_MEMORY = os.environ.get('DEBUG_GPU_MEMORY', '0') == '1'
 
 
 class BaseModel(nn.Module):
@@ -120,6 +126,9 @@ class SelfForcingModel(BaseModel):
             - pred_image: a tensor with shape [B, F, C, H, W].
             - denoised_timestep: an integer
         """
+        if DEBUG_GPU_MEMORY and dist.get_rank() == 0:
+            print_gpu_memory_summary(logging, tag="_run_generator START")
+        
         # Step 1: Sample noise and backward simulate the generator's input
         assert getattr(self.args, "backward_simulation", True), "Backward simulation needs to be enabled"
         if initial_latent is not None:
@@ -147,11 +156,17 @@ class SelfForcingModel(BaseModel):
         # Sync num_generated_frames across all processes
         noise_shape[1] = num_generated_frames
 
+        if DEBUG_GPU_MEMORY and dist.get_rank() == 0:
+            print_gpu_memory_summary(logging, tag=f"BEFORE _consistency_backward_simulation (frames={num_generated_frames})")
+        
         pred_image_or_video, denoised_timestep_from, denoised_timestep_to = self._consistency_backward_simulation(
             noise=torch.randn(noise_shape,
                               device=self.device, dtype=self.dtype),
             **conditional_dict,
         )
+        
+        if DEBUG_GPU_MEMORY and dist.get_rank() == 0:
+            print_gpu_memory_summary(logging, tag="AFTER _consistency_backward_simulation")
         # Slice last 21 frames
         if pred_image_or_video.shape[1] > 21:
             with torch.no_grad():

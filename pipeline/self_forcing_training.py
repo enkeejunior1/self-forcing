@@ -1,8 +1,17 @@
+import logging
+import os
 from utils.wan_wrapper import WanDiffusionWrapper
 from utils.scheduler import SchedulerInterface
+from utils.misc import print_gpu_memory_summary
 from typing import List, Optional
 import torch
 import torch.distributed as dist
+from tqdm import tqdm
+
+# Enable via: DEBUG_GPU_MEMORY=1
+DEBUG_GPU_MEMORY = os.environ.get('DEBUG_GPU_MEMORY', '0') == '1'
+# Enable via: DEBUG_INFERENCE=1
+DEBUG_INFERENCE = os.environ.get('DEBUG_INFERENCE', '0') == '1'
 
 
 class SelfForcingTrainingPipeline:
@@ -136,8 +145,16 @@ class SelfForcingTrainingPipeline:
         exit_flags = self.generate_and_sync_list(len(all_num_frames), num_denoising_steps, device=noise.device)
         start_gradient_frame_index = num_output_frames - 21
 
+        # Progress bar for inference (only rank 0, if DEBUG_INFERENCE=1)
+        rank = dist.get_rank() if dist.is_initialized() else 0
+        disable_tqdm = not DEBUG_INFERENCE or rank != 0
+        
         # for block_index in range(num_blocks):
-        for block_index, current_num_frames in enumerate(all_num_frames):
+        block_iter = enumerate(all_num_frames)
+        if DEBUG_INFERENCE and rank == 0:
+            block_iter = tqdm(block_iter, total=len(all_num_frames), desc="[Inference] Blocks", leave=False)
+        
+        for block_index, current_num_frames in block_iter:
             noisy_input = noise[
                 :, current_start_frame - num_input_frames:current_start_frame + current_num_frames - num_input_frames]
 
@@ -153,6 +170,9 @@ class SelfForcingTrainingPipeline:
                     dtype=torch.int64) * current_timestep
 
                 if not exit_flag:
+                    if DEBUG_GPU_MEMORY and dist.get_rank() == 0:
+                        print_gpu_memory_summary(logging, tag=f"BEFORE generator (block={block_index}, step={index}, t={current_timestep})")
+                    
                     with torch.no_grad():
                         _, denoised_pred = self.generator(
                             noisy_image_or_video=noisy_input,
@@ -162,6 +182,9 @@ class SelfForcingTrainingPipeline:
                             crossattn_cache=self.crossattn_cache,
                             current_start=current_start_frame * self.frame_seq_length
                         )
+                    
+                    if DEBUG_GPU_MEMORY and dist.get_rank() == 0:
+                        print_gpu_memory_summary(logging, tag=f"AFTER generator (block={block_index}, step={index})")
                         next_timestep = self.denoising_step_list[index + 1]
                         noisy_input = self.scheduler.add_noise(
                             denoised_pred.flatten(0, 1),
@@ -221,18 +244,22 @@ class SelfForcingTrainingPipeline:
         # Step 3.5: Return the denoised timestep
         if not self.same_step_across_blocks:
             denoised_timestep_from, denoised_timestep_to = None, None
-        elif exit_flags[0] == len(self.denoising_step_list) - 1:
+        elif len(exit_flags) > 0 and exit_flags[0] == len(self.denoising_step_list) - 1:
             denoised_timestep_to = 0
             denoised_timestep_from = 1000 - torch.argmin(
                 (self.scheduler.timesteps.cuda() - self.denoising_step_list[exit_flags[0]].cuda()).abs(), dim=0).item()
-        else:
+        elif len(exit_flags) > 0:
             denoised_timestep_to = 1000 - torch.argmin(
                 (self.scheduler.timesteps.cuda() - self.denoising_step_list[exit_flags[0] + 1].cuda()).abs(), dim=0).item()
             denoised_timestep_from = 1000 - torch.argmin(
                 (self.scheduler.timesteps.cuda() - self.denoising_step_list[exit_flags[0]].cuda()).abs(), dim=0).item()
+        else:
+            # Handle empty exit_flags case
+            denoised_timestep_from, denoised_timestep_to = None, None
 
         if return_sim_step:
-            return output, denoised_timestep_from, denoised_timestep_to, exit_flags[0] + 1
+            exit_step = exit_flags[0] + 1 if len(exit_flags) > 0 else 0
+            return output, denoised_timestep_from, denoised_timestep_to, exit_step
 
         return output, denoised_timestep_from, denoised_timestep_to
 
