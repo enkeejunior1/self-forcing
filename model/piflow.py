@@ -45,7 +45,7 @@ class Piflow(PiFlowSelfForcingModel):
         
         if self.policy_type == 'gmm':
             self.generator.init_gmm_heads(
-                K=policy_head_cfg.get('K', 8),
+                num_gaussians=policy_head_cfg.get('K', 8),
                 latent_c=policy_head_cfg.get('latent_c', 16),
                 patch_size=policy_head_cfg.get('patch_size', 2),
                 gm_num_logstd_layers=policy_head_cfg.get('gm_num_logstd_layers', 2),
@@ -54,7 +54,7 @@ class Piflow(PiFlowSelfForcingModel):
             )
         elif self.policy_type == 'dx':
             self.generator.init_dx_heads(
-                K=policy_head_cfg.get('K', 8),
+                num_grid_points=policy_head_cfg.get('K', 8),
                 latent_c=policy_head_cfg.get('latent_c', 16),
                 patch_size=policy_head_cfg.get('patch_size', 2),
             )
